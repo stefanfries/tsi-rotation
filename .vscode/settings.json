@@ -1,0 +1,22 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.profiles.windows": {
+    "PowerShell (tsi-rotation)": {
+      "source": "PowerShell",
+      "args": [
+        "-NoExit",
+        "-Command",
+        "& { if (Test-Path .\\.venv\\Scripts\\Activate.ps1) { . .\\.venv\\Scripts\\Activate.ps1 } }"
+      ]
+    },
+    "Command Prompt (tsi-rotation)": {
+      "path": "${env:windir}\\System32\\cmd.exe",
+      "args": [
+        "/k",
+        "if exist .\\.venv\\Scripts\\activate.bat call .\\.venv\\Scripts\\activate.bat"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "PowerShell (tsi-rotation)"
+}
