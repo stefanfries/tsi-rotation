@@ -23,10 +23,10 @@ from __future__ import annotations
 import argparse
 import calendar
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
 
 import httpx
 import numpy as np
@@ -96,7 +96,9 @@ def fetch_index_constituents_finhub(index_name: str) -> tuple[list[str], dict[st
             members_resp.raise_for_status()
             members = members_resp.json()
         except Exception as exc:
-            raise SystemExit(f"Failed to load {index_name} constituents from FinHub: {exc}") from exc
+            raise SystemExit(
+                f"Failed to load {index_name} constituents from FinHub: {exc}"
+            ) from exc
 
         for member in members:
             isin = member.get("isin")
@@ -152,7 +154,9 @@ def parse_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def download_frames(tickers: list[str], start: date, end: date, chunk_size: int) -> dict[str, pd.DataFrame]:
+def download_frames(
+    tickers: list[str], start: date, end: date, chunk_size: int
+) -> dict[str, pd.DataFrame]:
     if not tickers:
         return {}
 
@@ -393,13 +397,17 @@ def max_drawdown(equity: pd.Series) -> float:
     return float(drawdown.min())
 
 
-def cagr(start_value: float, end_value: float, periods: int, periods_per_year: float = 52.0) -> float:
+def cagr(
+    start_value: float, end_value: float, periods: int, periods_per_year: float = 52.0
+) -> float:
     if periods <= 0 or start_value <= 0 or end_value <= 0:
         return 0.0
     return float((end_value / start_value) ** (periods_per_year / periods) - 1.0)
 
 
-def summarize_holdings(state: PortfolioState, frames: dict[str, pd.DataFrame], as_of: date) -> list[tuple[str, float, float]]:
+def summarize_holdings(
+    state: PortfolioState, frames: dict[str, pd.DataFrame], as_of: date
+) -> list[tuple[str, float, float]]:
     rows: list[tuple[str, float, float]] = []
     for symbol, qty in sorted(state.positions.items()):
         frame = frames[symbol]
@@ -451,7 +459,9 @@ def run_backtest(
 
     trade_dates = pd.date_range(start=start, end=end, freq=f"W-{weekday_code(trade_weekday)}")
     if trade_weekday <= signal_weekday:
-        raise SystemExit("trade weekday must be later in the week than signal weekday for this script.")
+        raise SystemExit(
+            "trade weekday must be later in the week than signal weekday for this script."
+        )
 
     for trade_dt in trade_dates:
         signal_cutoff = (trade_dt - pd.Timedelta(days=1)).date()
@@ -539,28 +549,68 @@ def run_backtest(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backtest a weekly TSI rotation strategy.")
-    parser.add_argument("--tickers", nargs="*", default=[], help="Ticker symbols to include in the universe.")
+    parser.add_argument(
+        "--tickers", nargs="*", default=[], help="Ticker symbols to include in the universe."
+    )
     parser.add_argument("--tickers-file", type=Path, help="Optional file with one ticker per line.")
     parser.add_argument(
         "--universe-index",
         default=DEFAULT_UNIVERSE_INDEX,
         help="Universe index to fetch when no tickers are supplied (default: NASDAQ100).",
     )
-    parser.add_argument("--start", type=parse_date, default=date.today() - timedelta(days=3 * 365), help="Backtest start date (YYYY-MM-DD).")
-    parser.add_argument("--end", type=parse_date, default=date.today(), help="Backtest end date (YYYY-MM-DD).")
+    parser.add_argument(
+        "--start",
+        type=parse_date,
+        default=date.today() - timedelta(days=3 * 365),
+        help="Backtest start date (YYYY-MM-DD).",
+    )
+    parser.add_argument(
+        "--end", type=parse_date, default=date.today(), help="Backtest end date (YYYY-MM-DD)."
+    )
     parser.add_argument("--capital", type=float, default=10_000.0, help="Starting capital.")
     parser.add_argument("--top-n", type=int, default=15, help="Number of holdings to keep.")
-    parser.add_argument("--exit-rank", type=int, default=30, help="Sell a holding when its rank falls below this threshold.")
-    parser.add_argument("--signal-weekday", type=parse_weekday, default=parse_weekday("wednesday"), help="Weekday to compute the TSI ranking.")
-    parser.add_argument("--trade-weekday", type=parse_weekday, default=parse_weekday("thursday"), help="Weekday to place the trade after the signal.")
-    parser.add_argument("--fee-bps", type=float, default=0.0, help="Transaction cost in basis points on traded notional.")
+    parser.add_argument(
+        "--exit-rank",
+        type=int,
+        default=30,
+        help="Sell a holding when its rank falls below this threshold.",
+    )
+    parser.add_argument(
+        "--signal-weekday",
+        type=parse_weekday,
+        default=parse_weekday("wednesday"),
+        help="Weekday to compute the TSI ranking.",
+    )
+    parser.add_argument(
+        "--trade-weekday",
+        type=parse_weekday,
+        default=parse_weekday("thursday"),
+        help="Weekday to place the trade after the signal.",
+    )
+    parser.add_argument(
+        "--fee-bps",
+        type=float,
+        default=0.0,
+        help="Transaction cost in basis points on traded notional.",
+    )
     parser.add_argument("--tsi-fast", type=int, default=13, help="TSI fast EMA period.")
     parser.add_argument("--tsi-slow", type=int, default=25, help="TSI slow EMA period.")
-    parser.add_argument("--download-chunk-size", type=int, default=20, help="Batch size for yfinance downloads.")
-    parser.add_argument("--min-bars", type=int, default=180, help="Drop tickers with fewer than this many bars.")
-    parser.add_argument("--output-equity", type=Path, help="Optional CSV path for the equity curve.")
+    parser.add_argument(
+        "--download-chunk-size", type=int, default=20, help="Batch size for yfinance downloads."
+    )
+    parser.add_argument(
+        "--min-bars", type=int, default=180, help="Drop tickers with fewer than this many bars."
+    )
+    parser.add_argument(
+        "--output-equity", type=Path, help="Optional CSV path for the equity curve."
+    )
     parser.add_argument("--output-trades", type=Path, help="Optional CSV path for the trade log.")
-    parser.add_argument("--output-transactions", type=Path, default=Path("reports/tsi_transactions.xlsx"), help="Excel output path for all BUY/SELL transactions.")
+    parser.add_argument(
+        "--output-transactions",
+        type=Path,
+        default=Path("reports/tsi_transactions.xlsx"),
+        help="Excel output path for all BUY/SELL transactions.",
+    )
     return parser.parse_args()
 
 
@@ -572,7 +622,9 @@ def main() -> None:
         tickers.extend(read_tickers_file(args.tickers_file))
     if not tickers:
         tickers, symbol_names = fetch_index_constituents(args.universe_index)
-        print(f"No tickers supplied; using {args.universe_index} constituents ({len(tickers)} names).")
+        print(
+            f"No tickers supplied; using {args.universe_index} constituents ({len(tickers)} names)."
+        )
 
     tickers = list(dict.fromkeys(tickers))
     if not symbol_names:
@@ -596,7 +648,9 @@ def main() -> None:
     )
 
     if equity_df.empty:
-        raise SystemExit("Backtest produced no equity points. Try a longer date range or a different universe.")
+        raise SystemExit(
+            "Backtest produced no equity points. Try a longer date range or a different universe."
+        )
 
     equity_series = equity_df.set_index("trade_date")["equity"]
     start_value = float(equity_series.iloc[0])
@@ -605,28 +659,48 @@ def main() -> None:
     weekly_returns = equity_series.pct_change().dropna()
 
     total_return = end_value / start_value - 1.0
-    annual_vol = float(weekly_returns.std(ddof=0) * np.sqrt(52.0)) if not weekly_returns.empty else 0.0
-    sharpe = float((weekly_returns.mean() / weekly_returns.std(ddof=0)) * np.sqrt(52.0)) if len(weekly_returns) > 1 and weekly_returns.std(ddof=0) > 0 else 0.0
+    annual_vol = (
+        float(weekly_returns.std(ddof=0) * np.sqrt(52.0)) if not weekly_returns.empty else 0.0
+    )
+    sharpe = (
+        float((weekly_returns.mean() / weekly_returns.std(ddof=0)) * np.sqrt(52.0))
+        if len(weekly_returns) > 1 and weekly_returns.std(ddof=0) > 0
+        else 0.0
+    )
     max_dd = max_drawdown(equity_series)
     cagr_value = cagr(start_value, end_value, periods)
     avg_turnover = float(equity_df["turnover_pct"].mean()) if not equity_df.empty else 0.0
 
-    sells_df = transactions_df[transactions_df["transaction_type"] == "SELL"].copy() if not transactions_df.empty else pd.DataFrame()
+    sells_df = (
+        transactions_df[transactions_df["transaction_type"] == "SELL"].copy()
+        if not transactions_df.empty
+        else pd.DataFrame()
+    )
     total_transactions = int(len(transactions_df))
     total_sells = int(len(sells_df))
-    profitable_sells = sells_df[sells_df["realized_pnl_pct"] > 0] if not sells_df.empty else pd.DataFrame()
-    losing_sells = sells_df[sells_df["realized_pnl_pct"] < 0] if not sells_df.empty else pd.DataFrame()
+    profitable_sells = (
+        sells_df[sells_df["realized_pnl_pct"] > 0] if not sells_df.empty else pd.DataFrame()
+    )
+    losing_sells = (
+        sells_df[sells_df["realized_pnl_pct"] < 0] if not sells_df.empty else pd.DataFrame()
+    )
     profitable_sells_count = int(len(profitable_sells))
     losing_sells_count = int(len(losing_sells))
     profitable_sells_pct = (profitable_sells_count / total_sells * 100.0) if total_sells else 0.0
     losing_sells_pct = (losing_sells_count / total_sells * 100.0) if total_sells else 0.0
-    avg_profit_sell_pct = float(profitable_sells["realized_pnl_pct"].mean()) if profitable_sells_count else 0.0
-    avg_loss_sell_pct = float(losing_sells["realized_pnl_pct"].mean()) if losing_sells_count else 0.0
+    avg_profit_sell_pct = (
+        float(profitable_sells["realized_pnl_pct"].mean()) if profitable_sells_count else 0.0
+    )
+    avg_loss_sell_pct = (
+        float(losing_sells["realized_pnl_pct"].mean()) if losing_sells_count else 0.0
+    )
 
     print()
     print(f"Universe size: {len(tickers)}")
     print(f"Backtest range: {args.start} -> {args.end}")
-    print(f"Signal weekday: {weekday_code(args.signal_weekday)} | Trade weekday: {weekday_code(args.trade_weekday)}")
+    print(
+        f"Signal weekday: {weekday_code(args.signal_weekday)} | Trade weekday: {weekday_code(args.trade_weekday)}"
+    )
     print(f"Top N: {args.top_n} | Exit rank: {args.exit_rank} | Fee: {args.fee_bps:.2f} bps")
     print(f"Initial capital: {args.capital:,.2f}")
     print(f"Final capital:   {end_value:,.2f}")
@@ -646,7 +720,9 @@ def main() -> None:
         print()
         print("Final holdings:")
         for symbol, qty, price in final_holdings:
-            print(f"  {symbol:<12} qty={qty:>10.4f} price={price:>10.2f} value={qty * price:>12.2f}")
+            print(
+                f"  {symbol:<12} qty={qty:>10.4f} price={price:>10.2f} value={qty * price:>12.2f}"
+            )
 
     if args.output_equity:
         args.output_equity.parent.mkdir(parents=True, exist_ok=True)
