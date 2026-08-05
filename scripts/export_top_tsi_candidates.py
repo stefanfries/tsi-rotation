@@ -27,7 +27,7 @@ from backtest_tsi_rotation import (
 
 DEFAULT_UNIVERSE_INDEX = "NASDAQ100"
 DEFAULT_TOP_N: int | None = None
-DEFAULT_BUY_TOP_N: int | None = None
+DEFAULT_BUY_TOP_N = 15
 DEFAULT_TSI_FAST = 13
 DEFAULT_TSI_SLOW = 25
 DEFAULT_LOOKBACK_DAYS = 3 * 365
@@ -93,7 +93,9 @@ def fetch_index_constituents_with_metadata(index_name: str) -> list[dict[str, st
     return deduped
 
 
-def latest_tsi_and_price(frame: pd.DataFrame, fast: int, slow: int) -> tuple[float | None, float | None]:
+def latest_tsi_and_price(
+    frame: pd.DataFrame, fast: int, slow: int
+) -> tuple[float | None, float | None]:
     close = frame.get("Close")
     if close is None:
         return None, None
@@ -125,10 +127,14 @@ def parse_args() -> argparse.Namespace:
         "--buy-top-n",
         type=int,
         default=DEFAULT_BUY_TOP_N,
-        help="Mark top rows with BUY up to this rank (default: all selected rows).",
+        help="Mark top rows with BUY up to this rank (default: 15).",
     )
-    parser.add_argument("--tsi-fast", type=int, default=DEFAULT_TSI_FAST, help="TSI fast EMA period.")
-    parser.add_argument("--tsi-slow", type=int, default=DEFAULT_TSI_SLOW, help="TSI slow EMA period.")
+    parser.add_argument(
+        "--tsi-fast", type=int, default=DEFAULT_TSI_FAST, help="TSI fast EMA period."
+    )
+    parser.add_argument(
+        "--tsi-slow", type=int, default=DEFAULT_TSI_SLOW, help="TSI slow EMA period."
+    )
     parser.add_argument(
         "--lookback-days",
         type=int,
@@ -209,7 +215,7 @@ def main() -> None:
     if args.top_n is not None:
         ranked = ranked[: args.top_n]
 
-    buy_top_n = len(ranked) if args.buy_top_n is None else args.buy_top_n
+    buy_top_n = args.buy_top_n
 
     output_rows: list[dict[str, object]] = []
     for rank, row in enumerate(ranked, start=1):
@@ -226,17 +232,24 @@ def main() -> None:
         )
 
     out_df = pd.DataFrame(output_rows)
+    float_columns = ["Current TSI", "Current Price (USD)"]
+    for column in float_columns:
+        if column in out_df.columns:
+            out_df[column] = pd.to_numeric(out_df[column], errors="coerce").round(2)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     date_stamp = datetime.now().strftime("%Y-%m-%d")
     out_path = args.output_dir / f"top_tsi_candidates_{date_stamp}.xlsx"
 
+    def write_excel(path: Path) -> None:
+        out_df.to_excel(path, index=False, float_format="%.2f")
+
     try:
-        out_df.to_excel(out_path, index=False)
+        write_excel(out_path)
     except PermissionError:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = args.output_dir / f"top_tsi_candidates_{date_stamp}_{timestamp}.xlsx"
-        out_df.to_excel(out_path, index=False)
+        write_excel(out_path)
 
     print(f"Universe size (metadata): {len(tickers)}")
     print(f"Scored symbols: {len(scored_rows)}")
