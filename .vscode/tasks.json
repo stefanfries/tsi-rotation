@@ -1,0 +1,28 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "tsi-grid-run",
+			"type": "shell",
+			"command": "c:/Users/stefa/dev/finance/tsi-rotation/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/compare_strategies.py",
+				"--start",
+				"2016-08-04",
+				"--end",
+				"2026-08-04",
+				"--capital",
+				"10000",
+				"--top-n",
+				"15",
+				"--exit-rank",
+				"30",
+				"--fee-bps-list",
+				"0,10,25",
+				"--output-prefix",
+				"reports/comparison/tsi_grid_probe"
+			],
+			"isBackground": false
+		}
+	]
+}
