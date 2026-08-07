@@ -47,6 +47,23 @@ class PortfolioState:
     cash: float
     positions: dict[str, float] = field(default_factory=dict)
     avg_costs: dict[str, float] = field(default_factory=dict)
+    tax_loss_carryforward: float = 0.0
+    tax_allowance_year: int | None = None
+    tax_allowance_remaining: float = 0.0
+    tax_paid_total: float = 0.0
+
+
+@dataclass(frozen=True)
+class GermanTaxConfig:
+    enabled: bool = False
+    annual_allowance_eur: float = 1_000.0
+    abgeltungsteuer_rate: float = 0.25
+    solidarity_rate: float = 0.055
+    church_tax_rate: float = 0.0
+
+    @property
+    def effective_rate(self) -> float:
+        return self.abgeltungsteuer_rate * (1.0 + self.solidarity_rate + self.church_tax_rate)
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -152,6 +169,50 @@ def parse_weekday(value: str) -> int:
 
 def parse_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def apply_german_capital_gains_tax(
+    state: PortfolioState,
+    tax_config: GermanTaxConfig,
+    execution_date: date,
+    realized_pnl_eur: float,
+) -> float:
+    """Apply German stock capital gains taxation for realized PnL and return tax due in EUR.
+
+    Model assumptions:
+    - applies only to realized gains/losses from stock sells
+    - annual allowance (Sparer-Pauschbetrag) resets per calendar year
+    - unused allowance does not carry forward
+    - stock loss carryforward offsets future stock gains
+    - tax is deducted at realization time (event-based)
+    """
+    if not tax_config.enabled:
+        return 0.0
+
+    year = execution_date.year
+    if state.tax_allowance_year != year:
+        state.tax_allowance_year = year
+        state.tax_allowance_remaining = max(tax_config.annual_allowance_eur, 0.0)
+
+    if realized_pnl_eur <= 0.0:
+        state.tax_loss_carryforward += abs(realized_pnl_eur)
+        return 0.0
+
+    taxable_gain = realized_pnl_eur
+
+    if state.tax_loss_carryforward > 0.0:
+        offset = min(taxable_gain, state.tax_loss_carryforward)
+        taxable_gain -= offset
+        state.tax_loss_carryforward -= offset
+
+    if state.tax_allowance_remaining > 0.0:
+        allowance_used = min(taxable_gain, state.tax_allowance_remaining)
+        taxable_gain -= allowance_used
+        state.tax_allowance_remaining -= allowance_used
+
+    tax_due = max(taxable_gain, 0.0) * tax_config.effective_rate
+    state.tax_paid_total += tax_due
+    return tax_due
 
 
 def download_frames(
@@ -284,7 +345,15 @@ def rotate_portfolio(
     symbol_names: dict[str, str],
     execution_date: date,
     fee_bps: float,
-) -> tuple[PortfolioState, dict[str, float], float, float, list[dict[str, object]]]:
+    tax_config: GermanTaxConfig,
+) -> tuple[
+    PortfolioState,
+    dict[str, float],
+    float,
+    float,
+    float,
+    list[dict[str, object]],
+]:
     current_values: dict[str, float] = {}
     execution_prices: dict[str, float] = {}
     execution_timestamps: dict[str, pd.Timestamp] = {}
@@ -318,12 +387,33 @@ def rotate_portfolio(
         if (price := execution_prices.get(symbol)) is not None and price > 0
     ]
 
+    realized_pnl_total = 0.0
+    for symbol in sold_symbols:
+        price = execution_prices.get(symbol)
+        if price is None:
+            continue
+        qty = state.positions.get(symbol, 0.0)
+        if abs(qty) <= eps:
+            continue
+        old_avg = state.avg_costs.get(symbol, price)
+        realized_pnl_total += qty * (price - old_avg)
+
+    tax_due = apply_german_capital_gains_tax(
+        state=state,
+        tax_config=tax_config,
+        execution_date=execution_date,
+        realized_pnl_eur=realized_pnl_total,
+    )
+
     fee_rate = fee_bps / 10_000.0
     available_cash = state.cash + sell_notional
     buy_notional = 0.0
 
     if executable_new_symbols:
-        buy_notional = max((available_cash - fee_rate * sell_notional) / (1.0 + fee_rate), 0.0)
+        buy_notional = max(
+            (available_cash - fee_rate * sell_notional - tax_due) / (1.0 + fee_rate),
+            0.0,
+        )
         buy_value_per_symbol = buy_notional / len(executable_new_symbols)
         for symbol in executable_new_symbols:
             price = execution_prices[symbol]
@@ -355,6 +445,7 @@ def rotate_portfolio(
                 "name": symbol_name,
                 "amount_of_stocks": old_qty,
                 "price": price,
+                "realized_pnl_eur": old_qty * (price - old_avg),
                 "realized_pnl_pct": realized_pct,
             }
         )
@@ -374,19 +465,29 @@ def rotate_portfolio(
                 "name": symbol_names.get(symbol) or symbol,
                 "amount_of_stocks": buy_qty,
                 "price": price,
+                "realized_pnl_eur": np.nan,
                 "realized_pnl_pct": np.nan,
             }
         )
 
-    cash_after = available_cash - buy_notional - fee
+    cash_after = available_cash - buy_notional - fee - tax_due
     if cash_after < 0 and abs(cash_after) < 1e-8:
         cash_after = 0.0
 
     return (
-        PortfolioState(cash=cash_after, positions=new_positions, avg_costs=new_avg_costs),
+        PortfolioState(
+            cash=cash_after,
+            positions=new_positions,
+            avg_costs=new_avg_costs,
+            tax_loss_carryforward=state.tax_loss_carryforward,
+            tax_allowance_year=state.tax_allowance_year,
+            tax_allowance_remaining=state.tax_allowance_remaining,
+            tax_paid_total=state.tax_paid_total,
+        ),
         execution_prices,
         traded_notional,
         fee,
+        tax_due,
         transaction_rows,
     )
 
@@ -434,6 +535,7 @@ def run_backtest(
     tsi_slow: int,
     download_chunk_size: int,
     min_bars: int,
+    tax_config: GermanTaxConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[tuple[str, float, float]]]:
     frames = download_frames(tickers, start, end, chunk_size=download_chunk_size)
     if not frames:
@@ -495,13 +597,14 @@ def run_backtest(
         if exec_date is None:
             break
 
-        state, exec_prices, traded_notional, fee, tx_rows = rotate_portfolio(
+        state, exec_prices, traded_notional, fee, tax_due, tx_rows = rotate_portfolio(
             state=state,
             target_symbols=target,
             frames=frames,
             symbol_names=symbol_names,
             execution_date=exec_date,
             fee_bps=fee_bps,
+            tax_config=tax_config,
         )
         transaction_rows.extend(tx_rows)
 
@@ -525,6 +628,7 @@ def run_backtest(
                 "positions": len(state.positions),
                 "turnover_pct": traded_notional / equity if equity else 0.0,
                 "fee": fee,
+                "tax": tax_due,
                 "top_snapshot": top_snapshot,
             }
         )
@@ -536,6 +640,7 @@ def run_backtest(
                 "kept_symbols": ",".join(kept),
                 "sold_symbols": ",".join(sorted(set(current_holdings) - set(kept))),
                 "fee": fee,
+                "tax": tax_due,
                 "turnover_pct": traded_notional / equity if equity else 0.0,
             }
         )
@@ -593,6 +698,35 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Transaction cost in basis points on traded notional.",
     )
+    parser.add_argument(
+        "--enable-german-tax",
+        action="store_true",
+        help="Apply German capital gains tax model on realized stock gains.",
+    )
+    parser.add_argument(
+        "--tax-allowance-eur",
+        type=float,
+        default=1_000.0,
+        help="Annual Sparer-Pauschbetrag in EUR (default: 1000).",
+    )
+    parser.add_argument(
+        "--tax-abgeltungsteuer-rate",
+        type=float,
+        default=0.25,
+        help="Abgeltungsteuer rate as decimal (default: 0.25).",
+    )
+    parser.add_argument(
+        "--tax-solidarity-rate",
+        type=float,
+        default=0.055,
+        help="Solidarity surcharge rate on tax as decimal (default: 0.055).",
+    )
+    parser.add_argument(
+        "--tax-church-rate",
+        type=float,
+        default=0.0,
+        help="Church tax rate on tax as decimal (default: 0.0).",
+    )
     parser.add_argument("--tsi-fast", type=int, default=13, help="TSI fast EMA period.")
     parser.add_argument("--tsi-slow", type=int, default=25, help="TSI slow EMA period.")
     parser.add_argument(
@@ -630,6 +764,14 @@ def main() -> None:
     if not symbol_names:
         symbol_names = {symbol: symbol for symbol in tickers}
 
+    tax_config = GermanTaxConfig(
+        enabled=bool(args.enable_german_tax),
+        annual_allowance_eur=max(float(args.tax_allowance_eur), 0.0),
+        abgeltungsteuer_rate=max(float(args.tax_abgeltungsteuer_rate), 0.0),
+        solidarity_rate=max(float(args.tax_solidarity_rate), 0.0),
+        church_tax_rate=max(float(args.tax_church_rate), 0.0),
+    )
+
     equity_df, trades_df, transactions_df, final_holdings = run_backtest(
         tickers=tickers,
         symbol_names=symbol_names,
@@ -645,6 +787,7 @@ def main() -> None:
         tsi_slow=args.tsi_slow,
         download_chunk_size=args.download_chunk_size,
         min_bars=args.min_bars,
+        tax_config=tax_config,
     )
 
     if equity_df.empty:
@@ -670,6 +813,7 @@ def main() -> None:
     max_dd = max_drawdown(equity_series)
     cagr_value = cagr(start_value, end_value, periods)
     avg_turnover = float(equity_df["turnover_pct"].mean()) if not equity_df.empty else 0.0
+    total_tax_paid = float(equity_df["tax"].sum()) if "tax" in equity_df.columns else 0.0
 
     sells_df = (
         transactions_df[transactions_df["transaction_type"] == "SELL"].copy()
@@ -702,6 +846,15 @@ def main() -> None:
         f"Signal weekday: {weekday_code(args.signal_weekday)} | Trade weekday: {weekday_code(args.trade_weekday)}"
     )
     print(f"Top N: {args.top_n} | Exit rank: {args.exit_rank} | Fee: {args.fee_bps:.2f} bps")
+    print(
+        "German tax:      "
+        f"{'ON' if tax_config.enabled else 'OFF'}"
+        + (
+            f" | rate={tax_config.effective_rate * 100:,.3f}% | allowance={tax_config.annual_allowance_eur:,.2f}"
+            if tax_config.enabled
+            else ""
+        )
+    )
     print(f"Initial capital: {args.capital:,.2f}")
     print(f"Final capital:   {end_value:,.2f}")
     print(f"Total return:    {total_return * 100:,.2f}%")
@@ -710,6 +863,7 @@ def main() -> None:
     print(f"Sharpe:          {sharpe:,.2f}")
     print(f"Max drawdown:    {max_dd * 100:,.2f}%")
     print(f"Avg turnover:    {avg_turnover * 100:,.2f}%")
+    print(f"Tax paid total:  {total_tax_paid:,.2f}")
     print(f"Trade cycles:    {len(equity_df)}")
     print(f"Transactions:    {total_transactions}")
     print(f"Sells profit:    {profitable_sells_count} ({profitable_sells_pct:,.2f}%)")
@@ -746,6 +900,7 @@ def main() -> None:
                     "name",
                     "amount_of_stocks",
                     "price",
+                    "realized_pnl_eur",
                 ]
             ]
         try:
